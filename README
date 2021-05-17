@@ -1,0 +1,7 @@
+This is a work-in-progress HTTP/2 implementation based netpoll for Go.
+
+Demo server/client at h2demo
+
+Help & bug reports welcome!
+
+Thanks: https://golang.org/x/net/http2
