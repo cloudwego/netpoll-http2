@@ -114,7 +114,7 @@ func withoutPort(addr string) string {
 type h2i struct {
 	host   string
 	conn   netpoll.Connection
-	w      netpoll.ZeroCopyWriter
+	w      netpoll.Writer
 	framer *http2.Framer
 	term   *terminal.Terminal
 

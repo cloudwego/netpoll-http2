@@ -18,7 +18,7 @@
 
 // Transport code.
 
-package nhttp2
+package netpoll_http2
 
 import (
 	"bytes"

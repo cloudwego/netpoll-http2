@@ -33,7 +33,7 @@ func main() {
 		panic("create netpoll listener fail")
 	}
 
-	server := nhttp2.Server{Handler: &serverHandler{}, IdleTimeout: time.Minute}
+	server := netpoll_http2.Server{Handler: &serverHandler{}, IdleTimeout: time.Minute}
 	// handle: 连接读数据和处理逻辑
 	var onRequest netpoll.OnRequest = server.ServeConn
 

@@ -1,11 +1,11 @@
 // Copyright 2021 CloudWeGo Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,7 +16,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package nhttp2
+package netpoll_http2
 
 import (
 	"bytes"
@@ -228,7 +228,8 @@ func skipElement(s xml.StartElement) bool {
 func readSpecCov(r io.Reader) specCoverage {
 	sc := specCoverage{
 		coverage: map[specPart]bool{},
-		d:        xml.NewDecoder(r)}
+		d:        xml.NewDecoder(r),
+	}
 	sc.readSection(nil)
 	return sc
 }
@@ -247,7 +248,6 @@ func (sc specCoverage) cover(sec string, sentence string) {
 		}
 		sc.coverage[specPart{sec, s}] = true
 	}
-
 }
 
 var whitespaceRx = regexp.MustCompile(`\s+`)
@@ -273,17 +273,21 @@ func TestSpecParseSentences(t *testing.T) {
 		ss   string
 		want []string
 	}{
-		{"Sentence 1. Sentence 2.",
+		{
+			"Sentence 1. Sentence 2.",
 			[]string{
 				"Sentence 1.",
 				"Sentence 2.",
-			}},
-		{"Sentence 1.  \nSentence 2.\tSentence 3.",
+			},
+		},
+		{
+			"Sentence 1.  \nSentence 2.\tSentence 3.",
 			[]string{
 				"Sentence 1.",
 				"Sentence 2.",
 				"Sentence 3.",
-			}},
+			},
+		},
 	}
 
 	for i, tt := range tests {

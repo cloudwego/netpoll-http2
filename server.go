@@ -37,7 +37,7 @@
 // the Handler ServeHTTP function means you're both done reading and
 // done writing, without a way to stop just one or the other.
 
-package nhttp2
+package netpoll_http2
 
 import (
 	"bufio"

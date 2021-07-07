@@ -1,11 +1,11 @@
 // Copyright 2021 CloudWeGo Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,7 +16,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// package nhttp2 implements the HTTP/2 protocol.
+// package netpoll_http2 implements the HTTP/2 protocol.
 //
 // This package is low-level and intended to be used directly by very
 // few people. Most users will use it indirectly through the automatic
@@ -28,7 +28,7 @@
 //
 // See https://http2.golang.org/ for a test server running this code.
 //
-package nhttp2
+package netpoll_http2
 
 import (
 	"bufio"
@@ -86,9 +86,7 @@ const (
 	defaultMaxReadFrameSize = 1 << 20
 )
 
-var (
-	clientPreface = []byte(ClientPreface)
-)
+var clientPreface = []byte(ClientPreface)
 
 type streamState int
 
