@@ -19,7 +19,7 @@ import (
 	"io/ioutil"
 	"net/http"
 
-	http2 "github.com/cloudwego/nhttp2"
+	http2 "github.com/cloudwego/netpoll-http2"
 )
 
 func main() {

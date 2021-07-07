@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/netpoll"
-	"github.com/cloudwego/nhttp2"
+	"github.com/cloudwego/netpoll-http2"
 )
 
 func main() {

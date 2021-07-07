@@ -5,27 +5,30 @@ days of telnetting to your HTTP/1.n servers? We're bringing you
 back.
 
 Features:
+
 - send raw HTTP/2 frames
- - PING
- - SETTINGS
- - HEADERS
- - etc
+- PING
+- SETTINGS
+- HEADERS
+- etc
 - type in HTTP/1.n and have it auto-HPACK/frame-ify it for HTTP/2
 - pretty print all received HTTP/2 frames from the peer (including HPACK decoding)
 - tab completion of commands, options
 
 Not yet features, but soon:
-- unnecessary CONTINUATION frames on short boundaries, to test peer implementations 
+
+- unnecessary CONTINUATION frames on short boundaries, to test peer implementations
 - request bodies (DATA frames)
 - send invalid frames for testing server implementations (supported by underlying Framer)
 
 Later:
+
 - act like a server
 
 ## Installation
 
 ```
-$ go get github.com/cloudwego/nhttp2/h2i
+$ go get github.com/cloudwego/netpoll-http2/h2i
 $ h2i <host>
 ```
 
@@ -34,7 +37,7 @@ $ h2i <host>
 ```
 $ h2i
 Usage: h2i <hostname>
-  
+
 $ h2i google.com
 Connecting to google.com:443 ...
 Connected to 74.125.224.41:443
@@ -45,7 +48,7 @@ Negotiated protocol "h2-14"
   [MAX_FRAME_SIZE = 16384]
 [FrameHeader WINDOW_UPDATE len=4]
   Window-Increment = 983041
-  
+
 h2i> PING h2iSayHI
 [FrameHeader PING flags=ACK len=8]
   Data = "h2iSayHI"
@@ -53,7 +56,7 @@ h2i> headers
 (as HTTP/1.1)> GET / HTTP/1.1
 (as HTTP/1.1)> Host: ip.appspot.com
 (as HTTP/1.1)> User-Agent: h2i/brad-n-blake
-(as HTTP/1.1)>  
+(as HTTP/1.1)>
 Opening Stream-ID 1:
  :authority = ip.appspot.com
  :method = GET
@@ -71,10 +74,10 @@ Opening Stream-ID 1:
   "173.164.155.78\n"
 [FrameHeader PING len=8]
   Data = "\x00\x00\x00\x00\x00\x00\x00\x00"
-h2i> ping  
-[FrameHeader PING flags=ACK len=8]  
-  Data = "h2i_ping"  
-h2i> ping  
+h2i> ping
+[FrameHeader PING flags=ACK len=8]
+  Data = "h2i_ping"
+h2i> ping
 [FrameHeader PING flags=ACK len=8]
   Data = "h2i_ping"
 h2i> ping

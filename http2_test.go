@@ -30,7 +30,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudwego/nhttp2/hpack"
+	"github.com/cloudwego/netpoll-http2/hpack"
 )
 
 var knownFailing = flag.Bool("known_failing", false, "Run known-failing tests.")

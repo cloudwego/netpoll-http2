@@ -27,7 +27,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/cloudwego/nhttp2/hpack"
+	"github.com/cloudwego/netpoll-http2/hpack"
 )
 
 func testFramer() (*Framer, *bytes.Buffer) {

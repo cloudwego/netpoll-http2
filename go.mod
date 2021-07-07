@@ -1,4 +1,4 @@
-module github.com/cloudwego/nhttp2
+module github.com/cloudwego/netpoll-http2
 
 go 1.15
 

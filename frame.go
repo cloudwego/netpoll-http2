@@ -30,7 +30,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/cloudwego/netpoll"
-	"github.com/cloudwego/nhttp2/hpack"
+	"github.com/cloudwego/netpoll-http2/hpack"
 )
 
 const frameHeaderLen = 9

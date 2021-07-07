@@ -25,7 +25,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/cloudwego/nhttp2/hpack"
+	"github.com/cloudwego/netpoll-http2/hpack"
 	"golang.org/x/net/http/httpguts"
 )
 
