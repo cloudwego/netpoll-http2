@@ -18,7 +18,7 @@
 
 // Flow control
 
-package netpoll_http2
+package http2
 
 // flow is the flow control window's size.
 type flow struct {

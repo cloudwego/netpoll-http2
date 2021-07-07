@@ -18,7 +18,7 @@
 
 // Transport code's client connection pooling.
 
-package netpoll_http2
+package http2
 
 import (
 	"net/http"

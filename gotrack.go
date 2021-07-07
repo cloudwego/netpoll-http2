@@ -19,7 +19,7 @@
 // Defensive debug-only utility to track that functions run on the
 // goroutine that they're supposed to.
 
-package netpoll_http2
+package http2
 
 import (
 	"bytes"

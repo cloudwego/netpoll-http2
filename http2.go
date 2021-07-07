@@ -16,7 +16,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// package netpoll_http2 implements the HTTP/2 protocol.
+// package http2 implements the HTTP/2 protocol.
 //
 // This package is low-level and intended to be used directly by very
 // few people. Most users will use it indirectly through the automatic
@@ -28,7 +28,7 @@
 //
 // See https://http2.golang.org/ for a test server running this code.
 //
-package netpoll_http2
+package http2
 
 import (
 	"bufio"
