@@ -1539,6 +1539,7 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (*MetaHeadersFrame, error) {
 	}
 	mh := &MetaHeadersFrame{
 		HeadersFrame: hf,
+		Fields:       make([]hpack.HeaderField, 0, 8),
 	}
 	remainSize := fr.maxHeaderListSize()
 	var sawRegular bool
