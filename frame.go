@@ -280,9 +280,8 @@ type Framer struct {
 
 	maxWriteSize uint32 // zero means unlimited; TODO: implement
 
-	w          netpoll.Writer      // TODO: use netpoll.Writer
-	wbuf       *netpoll.LinkBuffer // TODO(zjb): LinkBuffer become nil after WriteV
-	wHeaderBuf []byte              // reference wbuf TODO(zjb): LinkBuffer can't seek back
+	w    netpoll.Writer
+	wbuf []byte
 
 	// AllowIllegalWrites permits the Framer's Write methods to
 	// write frames that do not conform to the HTTP/2 spec. This
@@ -335,9 +334,7 @@ func (fr *Framer) maxHeaderListSize() uint32 {
 
 func (f *Framer) startWrite(ftype FrameType, flags Flags, streamID uint32) {
 	// Write the FrameHeader.
-	f.wbuf = netpoll.NewLinkBuffer() // TODO(zjb): when netpoll fixbug, delete it
-	f.wHeaderBuf, _ = f.wbuf.Malloc(frameHeaderLen)
-	f.wHeaderBuf = append(f.wHeaderBuf[:0],
+	f.wbuf = append(f.wbuf[:0],
 		0, // 3 bytes of length, filled in in endWrite
 		0,
 		0,
@@ -352,18 +349,18 @@ func (f *Framer) startWrite(ftype FrameType, flags Flags, streamID uint32) {
 func (f *Framer) endWrite() error {
 	// Now that we know the final size, fill in the FrameHeader in
 	// the space previously reserved for it. Abuse append.
-	length := f.wbuf.MallocLen() - frameHeaderLen
+	length := len(f.wbuf) - frameHeaderLen
 	if length >= (1 << 24) {
 		return ErrFrameTooLarge
 	}
-	_ = append(f.wHeaderBuf[:0],
+	_ = append(f.wbuf[:0],
 		byte(length>>16),
 		byte(length>>8),
 		byte(length))
 	if f.logWrites {
 		f.logWrite()
 	}
-	_, err := f.w.Append(f.wbuf) // FIXME(zjb)： netpoll 保证全写，但不一定是一次写完的，大包会异步写
+	_, err := f.w.WriteBinary(f.wbuf)
 	return err
 }
 
@@ -376,15 +373,7 @@ func (f *Framer) logWrite() {
 		// in the wrong order:
 		f.debugFramer.AllowIllegalReads = true
 	}
-	// TODO: linkbuffer opt?
-	wb := f.wbuf.Bytes()
-	buf, _ := f.debugFramerBuf.Malloc(len(wb))
-	defer func() {
-		f.debugFramerBuf.Skip(len(wb))
-		f.debugFramerBuf.Release()
-	}()
-	buf = append(buf[:0], wb...)
-	f.debugFramerBuf.Flush()
+	_, _ = f.debugFramerBuf.WriteBinary(f.wbuf)
 	fr, err := f.debugFramer.ReadFrame()
 	if err != nil {
 		f.debugWriteLoggerf("http2: Framer %p: failed to decode just-written frame, err: %v", f, err)
@@ -394,23 +383,19 @@ func (f *Framer) logWrite() {
 }
 
 func (f *Framer) writeByte(v byte) {
-	buf, _ := f.wbuf.Malloc(1)
-	buf[0] = v
+	f.wbuf = append(f.wbuf, v)
 }
 
 func (f *Framer) writeBytes(v []byte) {
-	buf, _ := f.wbuf.Malloc(len(v))
-	copy(buf, v)
+	f.wbuf = append(f.wbuf, v...)
 }
 
 func (f *Framer) writeUint16(v uint16) {
-	buf, _ := f.wbuf.Malloc(2)
-	buf = append(buf[:0], byte(v>>8), byte(v))
+	f.wbuf = append(f.wbuf, byte(v>>8), byte(v))
 }
 
 func (f *Framer) writeUint32(v uint32) {
-	buf, _ := f.wbuf.Malloc(4)
-	buf = append(buf[:0], byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	f.wbuf = append(f.wbuf, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
 const (
@@ -826,14 +811,13 @@ func (f *Framer) WriteSettings(settings ...Setting) error {
 	return f.endWrite()
 }
 
-// WriteClientPrefaceAndSettings  FIXME(zjb) very dirty for netpoll
+// WriteClientPrefaceAndSettings
 func (f *Framer) WriteClientPrefaceAndSettings(settings ...Setting) error {
 	// start
-	f.wbuf = netpoll.NewLinkBuffer() // TODO(zjb): when netpoll fixbug, delete it
-	buf, _ := f.wbuf.Malloc(len(clientPreface))
-	copy(buf, clientPreface)
-	f.wHeaderBuf, _ = f.wbuf.Malloc(frameHeaderLen)
-	f.wHeaderBuf = append(f.wHeaderBuf[:0],
+	prefaceLen := len(clientPreface)
+	f.wbuf = make([]byte, 0, prefaceLen+frameHeaderLen)
+	f.wbuf = append(f.wbuf[:0], clientPreface...)
+	f.wbuf = append(f.wbuf[:prefaceLen],
 		0, // 3 bytes of length, filled in in endWrite
 		0,
 		0,
@@ -850,11 +834,11 @@ func (f *Framer) WriteClientPrefaceAndSettings(settings ...Setting) error {
 		f.writeUint32(s.Val)
 	}
 
-	length := f.wbuf.MallocLen() - frameHeaderLen - len(clientPreface)
+	length := len(f.wbuf) - frameHeaderLen - len(clientPreface)
 	if length >= (1 << 24) {
 		return ErrFrameTooLarge
 	}
-	_ = append(f.wHeaderBuf[:0],
+	_ = append(f.wbuf[:prefaceLen],
 		byte(length>>16),
 		byte(length>>8),
 		byte(length))
@@ -862,7 +846,7 @@ func (f *Framer) WriteClientPrefaceAndSettings(settings ...Setting) error {
 		f.logWrite()
 	}
 
-	_, err := f.w.Append(f.wbuf) // FIXME(zjb)： netpoll 保证全写，但不一定是一次写完的，大包会异步写
+	_, err := f.w.WriteBinary(f.wbuf)
 	return err
 }
 
@@ -1539,6 +1523,7 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (*MetaHeadersFrame, error) {
 	}
 	mh := &MetaHeadersFrame{
 		HeadersFrame: hf,
+		Fields:       make([]hpack.HeaderField, 0, 8),
 	}
 	remainSize := fr.maxHeaderListSize()
 	var sawRegular bool
