@@ -360,8 +360,12 @@ func (f *Framer) endWrite() error {
 	if f.logWrites {
 		f.logWrite()
 	}
-	_, err := f.w.WriteBinary(f.wbuf)
-	return err
+	destBuf, err := f.w.Malloc(len(f.wbuf))
+	if err != nil {
+		return err
+	}
+	copy(destBuf, f.wbuf)
+	return nil
 }
 
 func (f *Framer) logWrite() {
