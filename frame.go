@@ -26,11 +26,10 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/http/httpguts"
-
-	"github.com/cloudwego/netpoll"
-	"github.com/cloudwego/netpoll-http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 const frameHeaderLen = 9
@@ -231,20 +230,30 @@ func (h *FrameHeader) checkValid() {
 
 func (h *FrameHeader) invalidate() { h.valid = false }
 
-// ReadFrameHeader reads 9 bytes from r and returns a FrameHeader.
-// Most users should use Framer.ReadFrame instead.
-func ReadFrameHeader(r netpoll.Reader) (FrameHeader, error) {
-	return readFrameHeader(r)
+// frame header bytes.
+// Used only by ReadFrameHeader.
+var fhBytes = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, frameHeaderLen)
+		return &buf
+	},
 }
 
-func readFrameHeader(r netpoll.Reader) (FrameHeader, error) {
-	buf, err := r.Next(frameHeaderLen)
+// ReadFrameHeader reads 9 bytes from r and returns a FrameHeader.
+// Most users should use Framer.ReadFrame instead.
+func ReadFrameHeader(r io.Reader) (FrameHeader, error) {
+	bufp := fhBytes.Get().(*[]byte)
+	defer fhBytes.Put(bufp)
+	return readFrameHeader(*bufp, r)
+}
+
+func readFrameHeader(buf []byte, r io.Reader) (FrameHeader, error) {
+	_, err := io.ReadFull(r, buf[:frameHeaderLen])
 	if err != nil {
 		return FrameHeader{}, err
 	}
-	_ = buf[frameHeaderLen-1] // check length
 	return FrameHeader{
-		Length:   uint32(buf[0])<<16 | uint32(buf[1])<<8 | uint32(buf[2]),
+		Length:   (uint32(buf[0])<<16 | uint32(buf[1])<<8 | uint32(buf[2])),
 		Type:     FrameType(buf[3]),
 		Flags:    Flags(buf[4]),
 		StreamID: binary.BigEndian.Uint32(buf[5:]) & (1<<31 - 1),
@@ -268,7 +277,7 @@ type Frame interface {
 
 // A Framer reads and writes Frames.
 type Framer struct {
-	r         netpoll.Reader
+	r         io.Reader
 	lastFrame Frame
 	errDetail error
 
@@ -277,10 +286,17 @@ type Framer struct {
 	lastHeaderStream uint32
 
 	maxReadSize uint32
+	headerBuf   [frameHeaderLen]byte
+
+	// TODO: let getReadBuf be configurable, and use a less memory-pinning
+	// allocator in server.go to minimize memory pinned for many idle conns.
+	// Will probably also need to make frame invalidation have a hook too.
+	getReadBuf func(size uint32) []byte
+	readBuf    []byte // cache for default getReadBuf
 
 	maxWriteSize uint32 // zero means unlimited; TODO: implement
 
-	w    netpoll.Writer
+	w    io.Writer
 	wbuf []byte
 
 	// AllowIllegalWrites permits the Framer's Write methods to
@@ -318,7 +334,7 @@ type Framer struct {
 	logReads, logWrites bool
 
 	debugFramer       *Framer // only use for logging written writes
-	debugFramerBuf    *netpoll.LinkBuffer
+	debugFramerBuf    *bytes.Buffer
 	debugReadLoggerf  func(string, ...interface{})
 	debugWriteLoggerf func(string, ...interface{})
 
@@ -360,44 +376,35 @@ func (f *Framer) endWrite() error {
 	if f.logWrites {
 		f.logWrite()
 	}
-	destBuf, err := f.w.Malloc(len(f.wbuf))
-	if err != nil {
-		return err
+
+	n, err := f.w.Write(f.wbuf)
+	if err == nil && n != len(f.wbuf) {
+		err = io.ErrShortWrite
 	}
-	copy(destBuf, f.wbuf)
-	return nil
+	return err
 }
 
 func (f *Framer) logWrite() {
 	if f.debugFramer == nil {
-		f.debugFramerBuf = netpoll.NewLinkBuffer()
+		f.debugFramerBuf = new(bytes.Buffer)
 		f.debugFramer = NewFramer(nil, f.debugFramerBuf)
 		f.debugFramer.logReads = false // we log it ourselves, saying "wrote" below
 		// Let us read anything, even if we accidentally wrote it
 		// in the wrong order:
 		f.debugFramer.AllowIllegalReads = true
 	}
-	_, _ = f.debugFramerBuf.WriteBinary(f.wbuf)
+	f.debugFramerBuf.Write(f.wbuf)
 	fr, err := f.debugFramer.ReadFrame()
 	if err != nil {
-		f.debugWriteLoggerf("http2: Framer %p: failed to decode just-written frame, err: %v", f, err)
+		f.debugWriteLoggerf("http2: Framer %p: failed to decode just-written frame", f)
 		return
 	}
 	f.debugWriteLoggerf("http2: Framer %p: wrote %v", f, summarizeFrame(fr))
 }
 
-func (f *Framer) writeByte(v byte) {
-	f.wbuf = append(f.wbuf, v)
-}
-
-func (f *Framer) writeBytes(v []byte) {
-	f.wbuf = append(f.wbuf, v...)
-}
-
-func (f *Framer) writeUint16(v uint16) {
-	f.wbuf = append(f.wbuf, byte(v>>8), byte(v))
-}
-
+func (f *Framer) writeByte(v byte)     { f.wbuf = append(f.wbuf, v) }
+func (f *Framer) writeBytes(v []byte)  { f.wbuf = append(f.wbuf, v...) }
+func (f *Framer) writeUint16(v uint16) { f.wbuf = append(f.wbuf, byte(v>>8), byte(v)) }
 func (f *Framer) writeUint32(v uint32) {
 	f.wbuf = append(f.wbuf, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
@@ -429,7 +436,7 @@ func (fc *frameCache) getDataFrame() *DataFrame {
 }
 
 // NewFramer returns a Framer that writes frames to w and reads them from r.
-func NewFramer(w netpoll.Writer, r netpoll.Reader) *Framer {
+func NewFramer(w io.Writer, r io.Reader) *Framer {
 	fr := &Framer{
 		w:                 w,
 		r:                 r,
@@ -437,6 +444,13 @@ func NewFramer(w netpoll.Writer, r netpoll.Reader) *Framer {
 		logWrites:         logFrameWrites,
 		debugReadLoggerf:  log.Printf,
 		debugWriteLoggerf: log.Printf,
+	}
+	fr.getReadBuf = func(size uint32) []byte {
+		if cap(fr.readBuf) >= int(size) {
+			return fr.readBuf[:size]
+		}
+		fr.readBuf = make([]byte, size)
+		return fr.readBuf
 	}
 	fr.SetMaxReadFrameSize(maxFrameSize)
 	return fr
@@ -489,18 +503,15 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if fr.lastFrame != nil {
 		fr.lastFrame.invalidate()
 	}
-	fh, err := readFrameHeader(fr.r)
+	fh, err := readFrameHeader(fr.headerBuf[:], fr.r)
 	if err != nil {
 		return nil, err
 	}
 	if fh.Length > fr.maxReadSize {
 		return nil, ErrFrameTooLarge
 	}
-	payload, err := fr.r.ReadBinary(int(fh.Length))
-	if err != nil {
-		return nil, err
-	}
-	if err := fr.r.Release(); err != nil {
+	payload := fr.getReadBuf(fh.Length)
+	if _, err := io.ReadFull(fr.r, payload); err != nil {
 		return nil, err
 	}
 	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, payload)
@@ -681,10 +692,10 @@ func (f *Framer) WriteDataPadded(streamID uint32, endStream bool, data, pad []by
 	}
 	f.startWrite(FrameData, flags, streamID)
 	if pad != nil {
-		f.writeByte(byte(len(pad)))
+		f.wbuf = append(f.wbuf, byte(len(pad)))
 	}
-	f.writeBytes(data)
-	f.writeBytes(pad)
+	f.wbuf = append(f.wbuf, data...)
+	f.wbuf = append(f.wbuf, pad...)
 	return f.endWrite()
 }
 
@@ -813,45 +824,6 @@ func (f *Framer) WriteSettings(settings ...Setting) error {
 		f.writeUint32(s.Val)
 	}
 	return f.endWrite()
-}
-
-// WriteClientPrefaceAndSettings
-func (f *Framer) WriteClientPrefaceAndSettings(settings ...Setting) error {
-	// start
-	prefaceLen := len(clientPreface)
-	f.wbuf = make([]byte, 0, prefaceLen+frameHeaderLen)
-	f.wbuf = append(f.wbuf[:0], clientPreface...)
-	f.wbuf = append(f.wbuf[:prefaceLen],
-		0, // 3 bytes of length, filled in in endWrite
-		0,
-		0,
-		byte(FrameSettings),
-		byte(0),
-		byte(0),
-		byte(0),
-		byte(0),
-		byte(0))
-
-	// settings
-	for _, s := range settings {
-		f.writeUint16(uint16(s.ID))
-		f.writeUint32(s.Val)
-	}
-
-	length := len(f.wbuf) - frameHeaderLen - len(clientPreface)
-	if length >= (1 << 24) {
-		return ErrFrameTooLarge
-	}
-	_ = append(f.wbuf[:prefaceLen],
-		byte(length>>16),
-		byte(length>>8),
-		byte(length))
-	if f.logWrites {
-		f.logWrite()
-	}
-
-	_, err := f.w.WriteBinary(f.wbuf)
-	return err
 }
 
 // WriteSettingsAck writes an empty SETTINGS frame with the ACK bit set.
@@ -1134,8 +1106,8 @@ func (f *Framer) WriteHeaders(p HeadersFrameParam) error {
 		f.writeUint32(v)
 		f.writeByte(p.Priority.Weight)
 	}
-	f.writeBytes(p.BlockFragment)
-	f.writeBytes(padZeros[:p.PadLength])
+	f.wbuf = append(f.wbuf, p.BlockFragment...)
+	f.wbuf = append(f.wbuf, padZeros[:p.PadLength]...)
 	return f.endWrite()
 }
 
@@ -1273,7 +1245,7 @@ func (f *Framer) WriteContinuation(streamID uint32, endHeaders bool, headerBlock
 		flags |= FlagContinuationEndHeaders
 	}
 	f.startWrite(FrameContinuation, flags, streamID)
-	f.writeBytes(headerBlockFragment)
+	f.wbuf = append(f.wbuf, headerBlockFragment...)
 	return f.endWrite()
 }
 
@@ -1378,8 +1350,8 @@ func (f *Framer) WritePushPromise(p PushPromiseParam) error {
 		return errStreamID
 	}
 	f.writeUint32(p.PromiseID)
-	f.writeBytes(p.BlockFragment)
-	f.writeBytes(padZeros[:p.PadLength])
+	f.wbuf = append(f.wbuf, p.BlockFragment...)
+	f.wbuf = append(f.wbuf, padZeros[:p.PadLength]...)
 	return f.endWrite()
 }
 
@@ -1527,9 +1499,8 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (*MetaHeadersFrame, error) {
 	}
 	mh := &MetaHeadersFrame{
 		HeadersFrame: hf,
-		Fields:       make([]hpack.HeaderField, 0, 8),
 	}
-	remainSize := fr.maxHeaderListSize()
+	var remainSize = fr.maxHeaderListSize()
 	var sawRegular bool
 
 	var invalid error // pseudo header field errors

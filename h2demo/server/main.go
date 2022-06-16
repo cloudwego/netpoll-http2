@@ -33,9 +33,17 @@ func main() {
 		panic("create netpoll listener fail")
 	}
 
-	server := http2.Server{Handler: &serverHandler{}, IdleTimeout: time.Minute}
+	server := &http2.Server{IdleTimeout: time.Minute}
+
 	// handle: 连接读数据和处理逻辑
-	var onRequest netpoll.OnRequest = server.ServeConn
+	var onRequest netpoll.OnRequest = func(ctx context.Context, connection netpoll.Connection) error {
+		opt := &http2.ServeConnOpts{
+			Context: ctx,
+			Handler: &serverHandler{},
+		}
+		server.ServeConn(connection, opt)
+		return nil
+	}
 
 	// options: EventLoop 初始化自定义配置项
 	opts := []netpoll.Option{

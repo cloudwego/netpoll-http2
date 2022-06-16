@@ -228,8 +228,7 @@ func skipElement(s xml.StartElement) bool {
 func readSpecCov(r io.Reader) specCoverage {
 	sc := specCoverage{
 		coverage: map[specPart]bool{},
-		d:        xml.NewDecoder(r),
-	}
+		d:        xml.NewDecoder(r)}
 	sc.readSection(nil)
 	return sc
 }
@@ -248,6 +247,7 @@ func (sc specCoverage) cover(sec string, sentence string) {
 		}
 		sc.coverage[specPart{sec, s}] = true
 	}
+
 }
 
 var whitespaceRx = regexp.MustCompile(`\s+`)
@@ -273,21 +273,17 @@ func TestSpecParseSentences(t *testing.T) {
 		ss   string
 		want []string
 	}{
-		{
-			"Sentence 1. Sentence 2.",
+		{"Sentence 1. Sentence 2.",
 			[]string{
 				"Sentence 1.",
 				"Sentence 2.",
-			},
-		},
-		{
-			"Sentence 1.  \nSentence 2.\tSentence 3.",
+			}},
+		{"Sentence 1.  \nSentence 2.\tSentence 3.",
 			[]string{
 				"Sentence 1.",
 				"Sentence 2.",
 				"Sentence 3.",
-			},
-		},
+			}},
 	}
 
 	for i, tt := range tests {
