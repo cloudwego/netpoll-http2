@@ -27,7 +27,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/cloudwego/netpoll-http2/hpack"
+	"golang.org/x/net/http2/hpack"
 )
 
 func testFramer() (*Framer, *bytes.Buffer) {
@@ -174,7 +174,7 @@ func TestWriteDataPadded(t *testing.T) {
 		}
 		got := f.Header()
 		tt.wantHeader.valid = true
-		if got != tt.wantHeader {
+		if !got.Equal(tt.wantHeader) {
 			t.Errorf("%d. read %+v; want %+v", i, got, tt.wantHeader)
 			continue
 		}
@@ -183,6 +183,14 @@ func TestWriteDataPadded(t *testing.T) {
 			t.Errorf("%d. got %q; want %q", i, df.Data(), tt.data)
 		}
 	}
+}
+
+func (fh FrameHeader) Equal(b FrameHeader) bool {
+	return fh.valid == b.valid &&
+		fh.Type == b.Type &&
+		fh.Flags == b.Flags &&
+		fh.Length == b.Length &&
+		fh.StreamID == b.StreamID
 }
 
 func TestWriteHeaders(t *testing.T) {
@@ -563,7 +571,7 @@ func testWritePing(t *testing.T, ack bool) {
 	if ack {
 		wantFlags = FlagPingAck
 	}
-	wantEnc := "\x00\x00\x08\x06" + string(wantFlags) + "\x00\x00\x00\x00" + "\x01\x02\x03\x04\x05\x06\x07\x08"
+	var wantEnc = "\x00\x00\x08\x06" + string(wantFlags) + "\x00\x00\x00\x00" + "\x01\x02\x03\x04\x05\x06\x07\x08"
 	if buf.String() != wantEnc {
 		t.Errorf("encoded as %q; want %q", buf.Bytes(), wantEnc)
 	}
@@ -598,11 +606,9 @@ func TestReadFrameHeader(t *testing.T) {
 		}},
 		// Ignore high bit:
 		{in: "\xff\xff\xff" + "\xff" + "\xff" + "\xff\xff\xff\xff", want: FrameHeader{
-			Length: 16777215, Type: 255, Flags: 255, StreamID: 2147483647,
-		}},
+			Length: 16777215, Type: 255, Flags: 255, StreamID: 2147483647}},
 		{in: "\xff\xff\xff" + "\xff" + "\xff" + "\x7f\xff\xff\xff", want: FrameHeader{
-			Length: 16777215, Type: 255, Flags: 255, StreamID: 2147483647,
-		}},
+			Length: 16777215, Type: 255, Flags: 255, StreamID: 2147483647}},
 	}
 	for i, tt := range tests {
 		got, err := readFrameHeader(make([]byte, 9), strings.NewReader(tt.in))
@@ -611,7 +617,7 @@ func TestReadFrameHeader(t *testing.T) {
 			continue
 		}
 		tt.want.valid = true
-		if got != tt.want {
+		if !got.Equal(tt.want) {
 			t.Errorf("%d. readFrameHeader(%q) = %+v; want %+v", i, tt.in, got, tt.want)
 		}
 	}
@@ -652,6 +658,7 @@ func TestReadWriteFrameHeader(t *testing.T) {
 			t.Errorf("ReadFrameHeader(%+v) = %+v; mismatch", tt, fh)
 		}
 	}
+
 }
 
 func TestWriteTooLargeFrame(t *testing.T) {
@@ -974,7 +981,7 @@ func TestMetaFrameHeader(t *testing.T) {
 			name: "max_header_list_truncated",
 			w: func(f *Framer) {
 				var he hpackEncoder
-				pairs := []string{":method", "GET", ":path", "/"}
+				var pairs = []string{":method", "GET", ":path", "/"}
 				for i := 0; i < 100; i++ {
 					pairs = append(pairs, "foo", "bar")
 				}
@@ -1222,33 +1229,15 @@ func TestSettingsDuplicates(t *testing.T) {
 		{[]Setting{{ID: 4}, {ID: 2}, {ID: 3}, {ID: 4}}, true},
 
 		{[]Setting{
-			{ID: 1},
-			{ID: 2},
-			{ID: 3},
-			{ID: 4},
-			{ID: 5},
-			{ID: 6},
-			{ID: 7},
-			{ID: 8},
-			{ID: 9},
-			{ID: 10},
-			{ID: 11},
-			{ID: 12},
+			{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4},
+			{ID: 5}, {ID: 6}, {ID: 7}, {ID: 8},
+			{ID: 9}, {ID: 10}, {ID: 11}, {ID: 12},
 		}, false},
 
 		{[]Setting{
-			{ID: 1},
-			{ID: 2},
-			{ID: 3},
-			{ID: 4},
-			{ID: 5},
-			{ID: 6},
-			{ID: 7},
-			{ID: 8},
-			{ID: 9},
-			{ID: 10},
-			{ID: 11},
-			{ID: 11},
+			{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4},
+			{ID: 5}, {ID: 6}, {ID: 7}, {ID: 8},
+			{ID: 9}, {ID: 10}, {ID: 11}, {ID: 11},
 		}, true},
 	}
 	for i, tt := range tests {
@@ -1264,4 +1253,5 @@ func TestSettingsDuplicates(t *testing.T) {
 			t.Errorf("%d. HasDuplicates = %v; want %v", i, got, tt.want)
 		}
 	}
+
 }

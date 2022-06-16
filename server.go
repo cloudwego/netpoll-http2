@@ -61,9 +61,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudwego/netpoll"
-	"github.com/cloudwego/netpoll-http2/hpack"
 	"golang.org/x/net/http/httpguts"
+	"golang.org/x/net/http2/hpack"
 )
 
 const (
@@ -149,15 +148,6 @@ type Server struct {
 	// so that we don't embed a Mutex in this struct, which will make the
 	// struct non-copyable, which might break some callers.
 	state *serverInternalState
-
-	// BaseConfig optionally sets the base configuration
-	// for values. If nil, defaults are used.
-	BaseConfig *http.Server
-
-	// Handler specifies which handler to use for processing
-	// requests. If nil, BaseConfig.Handler is used. If BaseConfig
-	// or BaseConfig.Handler is nil, http.DefaultServeMux is used.
-	Handler http.Handler
 }
 
 func (s *Server) initialConnRecvWindowSize() int32 {
@@ -231,20 +221,131 @@ func (s *serverInternalState) startGracefulShutdown() {
 	s.mu.Unlock()
 }
 
-func (s *Server) baseConfig() *http.Server {
-	if s != nil && s.BaseConfig != nil {
-		return s.BaseConfig
+// ConfigureServer adds HTTP/2 support to a net/http Server.
+//
+// The configuration conf may be nil.
+//
+// ConfigureServer must be called before s begins serving.
+func ConfigureServer(s *http.Server, conf *Server) error {
+	if s == nil {
+		panic("nil *http.Server")
+	}
+	if conf == nil {
+		conf = new(Server)
+	}
+	conf.state = &serverInternalState{activeConns: make(map[*serverConn]struct{})}
+	if h1, h2 := s, conf; h2.IdleTimeout == 0 {
+		if h1.IdleTimeout != 0 {
+			h2.IdleTimeout = h1.IdleTimeout
+		} else {
+			h2.IdleTimeout = h1.ReadTimeout
+		}
+	}
+	s.RegisterOnShutdown(conf.state.startGracefulShutdown)
+
+	if s.TLSConfig == nil {
+		s.TLSConfig = new(tls.Config)
+	} else if s.TLSConfig.CipherSuites != nil && s.TLSConfig.MinVersion < tls.VersionTLS13 {
+		// If they already provided a TLS 1.0–1.2 CipherSuite list, return an
+		// error if it is missing ECDHE_RSA_WITH_AES_128_GCM_SHA256 or
+		// ECDHE_ECDSA_WITH_AES_128_GCM_SHA256.
+		haveRequired := false
+		for _, cs := range s.TLSConfig.CipherSuites {
+			switch cs {
+			case tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				// Alternative MTI cipher to not discourage ECDSA-only servers.
+				// See http://golang.org/cl/30721 for further information.
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
+				haveRequired = true
+			}
+		}
+		if !haveRequired {
+			return fmt.Errorf("http2: TLSConfig.CipherSuites is missing an HTTP/2-required AES_128_GCM_SHA256 cipher (need at least one of TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 or TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)")
+		}
+	}
+
+	// Note: not setting MinVersion to tls.VersionTLS12,
+	// as we don't want to interfere with HTTP/1.1 traffic
+	// on the user's server. We enforce TLS 1.2 later once
+	// we accept a connection. Ideally this should be done
+	// during next-proto selection, but using TLS <1.2 with
+	// HTTP/2 is still the client's bug.
+
+	s.TLSConfig.PreferServerCipherSuites = true
+
+	if !strSliceContains(s.TLSConfig.NextProtos, NextProtoTLS) {
+		s.TLSConfig.NextProtos = append(s.TLSConfig.NextProtos, NextProtoTLS)
+	}
+	if !strSliceContains(s.TLSConfig.NextProtos, "http/1.1") {
+		s.TLSConfig.NextProtos = append(s.TLSConfig.NextProtos, "http/1.1")
+	}
+
+	if s.TLSNextProto == nil {
+		s.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
+	}
+	protoHandler := func(hs *http.Server, c *tls.Conn, h http.Handler) {
+		if testHookOnConn != nil {
+			testHookOnConn()
+		}
+		// The TLSNextProto interface predates contexts, so
+		// the net/http package passes down its per-connection
+		// base context via an exported but unadvertised
+		// method on the Handler. This is for internal
+		// net/http<=>http2 use only.
+		var ctx context.Context
+		type baseContexter interface {
+			BaseContext() context.Context
+		}
+		if bc, ok := h.(baseContexter); ok {
+			ctx = bc.BaseContext()
+		}
+		conf.ServeConn(c, &ServeConnOpts{
+			Context:    ctx,
+			Handler:    h,
+			BaseConfig: hs,
+		})
+	}
+	s.TLSNextProto[NextProtoTLS] = protoHandler
+	return nil
+}
+
+// ServeConnOpts are options for the Server.ServeConn method.
+type ServeConnOpts struct {
+	// Context is the base context to use.
+	// If nil, context.Background is used.
+	Context context.Context
+
+	// BaseConfig optionally sets the base configuration
+	// for values. If nil, defaults are used.
+	BaseConfig *http.Server
+
+	// Handler specifies which handler to use for processing
+	// requests. If nil, BaseConfig.Handler is used. If BaseConfig
+	// or BaseConfig.Handler is nil, http.DefaultServeMux is used.
+	Handler http.Handler
+}
+
+func (o *ServeConnOpts) context() context.Context {
+	if o != nil && o.Context != nil {
+		return o.Context
+	}
+	return context.Background()
+}
+
+func (o *ServeConnOpts) baseConfig() *http.Server {
+	if o != nil && o.BaseConfig != nil {
+		return o.BaseConfig
 	}
 	return new(http.Server)
 }
 
-func (s *Server) handler() http.Handler {
-	if s != nil {
-		if s.Handler != nil {
-			return s.Handler
+func (o *ServeConnOpts) handler() http.Handler {
+	if o != nil {
+		if o.Handler != nil {
+			return o.Handler
 		}
-		if s.BaseConfig != nil && s.BaseConfig.Handler != nil {
-			return s.BaseConfig.Handler
+		if o.BaseConfig != nil && o.BaseConfig.Handler != nil {
+			return o.BaseConfig.Handler
 		}
 	}
 	return http.DefaultServeMux
@@ -264,23 +365,18 @@ func (s *Server) handler() http.Handler {
 // implemented in terms of providing a suitably-behaving net.Conn.
 //
 // The opts parameter is optional. If nil, default values are used.
-func (s *Server) ServeConn(ctx context.Context, c netpoll.Connection) error {
-	// ctx, cancel := context.WithCancel(ctx)
-	// defer cancel()
-	ctx = context.WithValue(ctx, http.LocalAddrContextKey, c.LocalAddr())
-	if hs := s.baseConfig(); hs != nil {
-		ctx = context.WithValue(ctx, http.ServerContextKey, hs)
-	}
+func (s *Server) ServeConn(c net.Conn, opts *ServeConnOpts) {
+	baseCtx, cancel := serverConnBaseContext(c, opts)
+	defer cancel()
 
 	sc := &serverConn{
-		srv:           s,
-		hs:            s.baseConfig(),
-		conn:          c,
-		r:             c.Reader(),
-		baseCtx:       ctx,
-		remoteAddrStr: c.RemoteAddr().String(),
-		// bw:                          newBufferedWriter(c),
-		handler:                     s.handler(),
+		srv:                         s,
+		hs:                          opts.baseConfig(),
+		conn:                        c,
+		baseCtx:                     baseCtx,
+		remoteAddrStr:               c.RemoteAddr().String(),
+		bw:                          newBufferedWriter(c),
+		handler:                     opts.handler(),
 		streams:                     make(map[uint32]*stream),
 		readFrameCh:                 make(chan readFrameResult),
 		wantWriteFrameCh:            make(chan FrameWriteRequest, 8),
@@ -322,36 +418,87 @@ func (s *Server) ServeConn(ctx context.Context, c netpoll.Connection) error {
 	sc.inflow.add(initialWindowSize)
 	sc.hpackEncoder = hpack.NewEncoder(&sc.headerWriteBuf)
 
-	sc.w = c.Writer()
-	fr := NewFramer(sc.w, sc.r)
+	fr := NewFramer(sc.bw, c)
 	fr.ReadMetaHeaders = hpack.NewDecoder(initialHeaderTableSize, nil)
 	fr.MaxHeaderListSize = sc.maxHeaderListSize()
 	fr.SetMaxReadFrameSize(s.maxReadFrameSize())
 	sc.framer = fr
 
+	if tc, ok := c.(connectionStater); ok {
+		sc.tlsState = new(tls.ConnectionState)
+		*sc.tlsState = tc.ConnectionState()
+		// 9.2 Use of TLS Features
+		// An implementation of HTTP/2 over TLS MUST use TLS
+		// 1.2 or higher with the restrictions on feature set
+		// and cipher suite described in this section. Due to
+		// implementation limitations, it might not be
+		// possible to fail TLS negotiation. An endpoint MUST
+		// immediately terminate an HTTP/2 connection that
+		// does not meet the TLS requirements described in
+		// this section with a connection error (Section
+		// 5.4.1) of type INADEQUATE_SECURITY.
+		if sc.tlsState.Version < tls.VersionTLS12 {
+			sc.rejectConn(ErrCodeInadequateSecurity, "TLS version too low")
+			return
+		}
+
+		if sc.tlsState.ServerName == "" {
+			// Client must use SNI, but we don't enforce that anymore,
+			// since it was causing problems when connecting to bare IP
+			// addresses during development.
+			//
+			// TODO: optionally enforce? Or enforce at the time we receive
+			// a new request, and verify the ServerName matches the :authority?
+			// But that precludes proxy situations, perhaps.
+			//
+			// So for now, do nothing here again.
+		}
+
+		if !s.PermitProhibitedCipherSuites && isBadCipher(sc.tlsState.CipherSuite) {
+			// "Endpoints MAY choose to generate a connection error
+			// (Section 5.4.1) of type INADEQUATE_SECURITY if one of
+			// the prohibited cipher suites are negotiated."
+			//
+			// We choose that. In my opinion, the spec is weak
+			// here. It also says both parties must support at least
+			// TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 so there's no
+			// excuses here. If we really must, we could allow an
+			// "AllowInsecureWeakCiphers" option on the server later.
+			// Let's see how it plays out first.
+			sc.rejectConn(ErrCodeInadequateSecurity, fmt.Sprintf("Prohibited TLS 1.2 Cipher Suite: %x", sc.tlsState.CipherSuite))
+			return
+		}
+	}
+
 	if hook := testHookGetServerConn; hook != nil {
 		hook(sc)
 	}
 	sc.serve()
-	return nil // TODO(zjb)
+}
+
+func serverConnBaseContext(c net.Conn, opts *ServeConnOpts) (ctx context.Context, cancel func()) {
+	ctx, cancel = context.WithCancel(opts.context())
+	ctx = context.WithValue(ctx, http.LocalAddrContextKey, c.LocalAddr())
+	if hs := opts.baseConfig(); hs != nil {
+		ctx = context.WithValue(ctx, http.ServerContextKey, hs)
+	}
+	return
 }
 
 func (sc *serverConn) rejectConn(err ErrCode, debug string) {
 	sc.vlogf("http2: server rejecting conn: %v, %s", err, debug)
 	// ignoring errors. hanging up anyway.
 	sc.framer.WriteGoAway(0, err, []byte(debug))
-	sc.w.Flush()
+	sc.bw.Flush()
 	sc.conn.Close()
 }
 
 type serverConn struct {
 	// Immutable:
-	srv  *Server
-	hs   *http.Server
-	conn net.Conn
-	r    netpoll.Reader
-	w    netpoll.Writer
-	// bw               *bufferedWriter // writing to conn
+	srv              *Server
+	hs               *http.Server
+	conn             net.Conn
+	bw               *bufferedWriter // writing to conn
 	handler          http.Handler
 	baseCtx          context.Context
 	framer           *Framer
@@ -438,13 +585,10 @@ type stream struct {
 	cancelCtx func()
 
 	// owned by serverConn's serve loop:
-	bodyBytes        int64   // body bytes seen so far
-	declBodyBytes    int64   // or -1 if undeclared
-	flow             flow    // limits writing from Handler to client
-	inflow           flow    // what the client is allowed to POST/etc to us
-	parent           *stream // or nil
-	numTrailerValues int64
-	weight           uint8
+	bodyBytes        int64 // body bytes seen so far
+	declBodyBytes    int64 // or -1 if undeclared
+	flow             flow  // limits writing from Handler to client
+	inflow           flow  // what the client is allowed to POST/etc to us
 	state            streamState
 	resetQueued      bool        // RST_STREAM queued for write; set by sc.resetStream
 	gotTrailerHeader bool        // HEADER frame for trailers was seen
@@ -457,7 +601,7 @@ type stream struct {
 
 func (sc *serverConn) Framer() *Framer  { return sc.framer }
 func (sc *serverConn) CloseConn() error { return sc.conn.Close() }
-func (sc *serverConn) Flush() error     { return sc.w.Flush() }
+func (sc *serverConn) Flush() error     { return sc.bw.Flush() }
 func (sc *serverConn) HeaderEncoder() (*hpack.Encoder, *bytes.Buffer) {
 	return sc.hpackEncoder, &sc.headerWriteBuf
 }
@@ -621,6 +765,7 @@ func (sc *serverConn) readFrames() {
 
 // frameWriteResult is the message passed from writeFrameAsync to the serve goroutine.
 type frameWriteResult struct {
+	_   incomparable
 	wr  FrameWriteRequest // what was written (or attempted)
 	err error             // result of the writeFrame call
 }
@@ -631,7 +776,7 @@ type frameWriteResult struct {
 // serverConn.
 func (sc *serverConn) writeFrameAsync(wr FrameWriteRequest) {
 	err := wr.write.writeFrame(sc)
-	sc.wroteFrameCh <- frameWriteResult{wr, err}
+	sc.wroteFrameCh <- frameWriteResult{wr: wr, err: err}
 }
 
 func (sc *serverConn) closeAllStreamsOnConnClose() {
@@ -820,7 +965,8 @@ func (sc *serverConn) readPreface() error {
 	errc := make(chan error, 1)
 	go func() {
 		// Read the client preface
-		if buf, err := sc.r.Next(len(clientPreface)); err != nil {
+		buf := make([]byte, len(ClientPreface))
+		if _, err := io.ReadFull(sc.conn, buf); err != nil {
 			errc <- err
 		} else if !bytes.Equal(buf, clientPreface) {
 			errc <- fmt.Errorf("bogus greeting %q", buf)
@@ -1017,16 +1163,10 @@ func (sc *serverConn) startFrameWrite(wr FrameWriteRequest) {
 
 	sc.writingFrame = true
 	sc.needsFrameFlush = true
-
-	/* TODO(zjb): opt use writeFrameAsync
-	sc.writingFrameAsync = false
-	err := wr.write.writeFrame(sc)
-	sc.wroteFrame(frameWriteResult{wr, err})
-	*/
-	if wr.write.staysWithinBuffer(4096) { // TODO(zjb)； 4096 is magic
+	if wr.write.staysWithinBuffer(sc.bw.Available()) {
 		sc.writingFrameAsync = false
 		err := wr.write.writeFrame(sc)
-		sc.wroteFrame(frameWriteResult{wr, err})
+		sc.wroteFrame(frameWriteResult{wr: wr, err: err})
 	} else {
 		sc.writingFrameAsync = true
 		go sc.writeFrameAsync(wr)
@@ -1157,7 +1297,9 @@ func (sc *serverConn) startGracefulShutdown() {
 	sc.shutdownOnce.Do(func() { sc.sendServeMsg(gracefulShutdownMsg) })
 }
 
-// After sending GOAWAY, the connection will close after goAwayTimeout.
+// After sending GOAWAY with an error code (non-graceful shutdown), the
+// connection will close after goAwayTimeout.
+//
 // If we close the connection immediately after sending GOAWAY, there may
 // be unsent data in our kernel receive buffer, which will cause the kernel
 // to send a TCP RST on close() instead of a FIN. This RST will abort the
@@ -1493,23 +1635,37 @@ func (sc *serverConn) processSettingInitialWindowSize(val uint32) error {
 
 func (sc *serverConn) processData(f *DataFrame) error {
 	sc.serveG.check()
-	if sc.inGoAway && sc.goAwayCode != ErrCodeNo {
+	id := f.Header().StreamID
+	if sc.inGoAway && (sc.goAwayCode != ErrCodeNo || id > sc.maxClientStreamID) {
+		// Discard all DATA frames if the GOAWAY is due to an
+		// error, or:
+		//
+		// Section 6.8: After sending a GOAWAY frame, the sender
+		// can discard frames for streams initiated by the
+		// receiver with identifiers higher than the identified
+		// last stream.
 		return nil
 	}
-	data := f.Data()
 
-	// "If a DATA frame is received whose stream is not in "open"
-	// or "half closed (local)" state, the recipient MUST respond
-	// with a stream error (Section 5.4.2) of type STREAM_CLOSED."
-	id := f.Header().StreamID
+	data := f.Data()
 	state, st := sc.state(id)
 	if id == 0 || state == stateIdle {
+		// Section 6.1: "DATA frames MUST be associated with a
+		// stream. If a DATA frame is received whose stream
+		// identifier field is 0x0, the recipient MUST respond
+		// with a connection error (Section 5.4.1) of type
+		// PROTOCOL_ERROR."
+		//
 		// Section 5.1: "Receiving any frame other than HEADERS
 		// or PRIORITY on a stream in this state MUST be
 		// treated as a connection error (Section 5.4.1) of
 		// type PROTOCOL_ERROR."
 		return ConnectionError(ErrCodeProtocol)
 	}
+
+	// "If a DATA frame is received whose stream is not in "open"
+	// or "half closed (local)" state, the recipient MUST respond
+	// with a stream error (Section 5.4.2) of type STREAM_CLOSED."
 	if st == nil || state != stateOpen || st.gotTrailerHeader || st.resetQueued {
 		// This includes sending a RST_STREAM if the stream is
 		// in stateHalfClosedLocal (which currently means that
@@ -1558,6 +1714,7 @@ func (sc *serverConn) processData(f *DataFrame) error {
 		if len(data) > 0 {
 			wrote, err := st.body.Write(data)
 			if err != nil {
+				sc.sendWindowUpdate(nil, int(f.Length)-wrote)
 				return streamError(id, ErrCodeStreamClosed)
 			}
 			if wrote != len(data) {
@@ -1884,7 +2041,11 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 	}
 	if bodyOpen {
 		if vv, ok := rp.header["Content-Length"]; ok {
-			req.ContentLength, _ = strconv.ParseInt(vv[0], 10, 64)
+			if cl, err := strconv.ParseUint(vv[0], 10, 63); err == nil {
+				req.ContentLength = int64(cl)
+			} else {
+				req.ContentLength = 0
+			}
 		} else {
 			req.ContentLength = -1
 		}
@@ -1922,7 +2083,7 @@ func (sc *serverConn) newWriterAndRequestNoBody(st *stream, rp requestParam) (*r
 	var trailer http.Header
 	for _, v := range rp.header["Trailer"] {
 		for _, key := range strings.Split(v, ",") {
-			key = http.CanonicalHeaderKey(strings.TrimSpace(key))
+			key = http.CanonicalHeaderKey(textproto.TrimString(key))
 			switch key {
 			case "Transfer-Encoding", "Trailer", "Content-Length":
 				// Bogus. (copy of http1 rules)
@@ -2140,6 +2301,7 @@ func (sc *serverConn) sendWindowUpdate32(st *stream, n int32) {
 // requestBody is the Handler's Request.Body type.
 // Read and Close may be called concurrently.
 type requestBody struct {
+	_             incomparable
 	stream        *stream
 	conn          *serverConn
 	closed        bool  // for use by Close only
@@ -2266,9 +2428,8 @@ func (rws *responseWriterState) writeChunk(p []byte) (n int, err error) {
 		var ctype, clen string
 		if clen = rws.snapHeader.Get("Content-Length"); clen != "" {
 			rws.snapHeader.Del("Content-Length")
-			clen64, err := strconv.ParseInt(clen, 10, 64)
-			if err == nil && clen64 >= 0 {
-				rws.sentContentLen = clen64
+			if cl, err := strconv.ParseUint(clen, 10, 63); err == nil {
+				rws.sentContentLen = int64(cl)
 			} else {
 				clen = ""
 			}
@@ -2632,8 +2793,12 @@ func (w *responseWriter) Push(target string, opts *http.PushOptions) error {
 		// but PUSH_PROMISE requests cannot have a body.
 		// http://tools.ietf.org/html/rfc7540#section-8.2
 		// Also disallow Host, since the promised URL must be absolute.
-		switch strings.ToLower(k) {
-		case "content-length", "content-encoding", "trailer", "te", "expect", "host":
+		if asciiEqualFold(k, "content-length") ||
+			asciiEqualFold(k, "content-encoding") ||
+			asciiEqualFold(k, "trailer") ||
+			asciiEqualFold(k, "te") ||
+			asciiEqualFold(k, "expect") ||
+			asciiEqualFold(k, "host") {
 			return fmt.Errorf("promised request headers cannot include %q", k)
 		}
 	}
